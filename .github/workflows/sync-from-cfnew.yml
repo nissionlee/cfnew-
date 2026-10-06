@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '0 */6 * * *'  # 每6小时自动检查一次
 
+permissions:
+  contents: write
+
 jobs:
   sync-release:
     runs-on: ubuntu-latest
@@ -17,32 +20,37 @@ jobs:
       
       - name: 获取 cfnew 最新发布
         id: get_latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取最新 release 信息
+          # 获取最新 release 信息（使用 GITHUB_TOKEN 鉴权，避免共享 IP 403 限流）
           echo "正在获取最新发布信息..."
-          LATEST_RELEASE=$(curl -s https://api.github.com/repos/byJoey/cfnew/releases/latest)
+          LATEST_RELEASE=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+                                   -H "Accept: application/vnd.github+json" \
+                                   -H "User-Agent: GitHub-Actions" \
+                                   https://api.github.com/repos/byJoey/cfnew/releases/latest)
           
-          # 使用 sed 提取版本号（兼容性更好）
-          VERSION=$(echo "$LATEST_RELEASE" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p')
+          # 提取版本号
+          VERSION=$(echo "$LATEST_RELEASE" | grep -o '"tag_name": *"[^"]*"' | sed 's/"tag_name": *"//;s/"//')
+          
+          # 校验版本号是否获取成功（防止 API 返回错误导致后续步骤异常退出）
+          if [ -z "$VERSION" ]; then
+            echo "错误：未能获取到版本号，API 返回内容如下："
+            echo "$LATEST_RELEASE"
+            exit 1
+          fi
           
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "最新版本: $VERSION"
           
-          # 获取所有 assets 文件
-          ASSETS_URL=$(echo "$LATEST_RELEASE" | sed -n 's/.*"assets_url": "\([^"]*\)".*/\1/p')
-          echo "正在获取文件列表..."
-          ASSETS=$(curl -s "$ASSETS_URL")
-          
-          # 查找 Pages.zip 文件
-          # 使用更可靠的方法查找包含 Pages.zip 的下载 URL
-          DOWNLOAD_URL=$(echo "$ASSETS" | grep -i "Pages\.zip" | grep -o '"browser_download_url": "[^"]*"' | sed 's/"browser_download_url": "\([^"]*\)"/\1/' | head -1)
+          # 查找 Pages.zip 下载 URL（直接从 latest release 的 assets 中解析）
+          DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | grep -i "Pages\.zip" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/"browser_download_url": *"//;s/"//' | head -1)
           FILE_NAME="Pages.zip"
           
+          # 容错：如果未在 assets 列表中解析到，回退使用标准 Release 下载地址
           if [ -z "$DOWNLOAD_URL" ]; then
-            echo "错误：未找到 Pages.zip 文件"
-            echo "可用的文件列表："
-            echo "$ASSETS" | grep -o '"name": "[^"]*"' | sed 's/"name": "\([^"]*\)"/  - \1/'
-            exit 1
+            echo "提示：未在 release assets 中找到直接地址，使用官方标准发布下载路径"
+            DOWNLOAD_URL="https://github.com/byJoey/cfnew/releases/download/${VERSION}/Pages.zip"
           fi
           
           echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
